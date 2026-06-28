@@ -2,7 +2,7 @@
  * @file config.h
  * @brief ASV Thrust Controller Configuration
  *
- * ESP32 + BLHeli_S (3D Mode) + DShot300 Bidirectional
+ * ESP32 + BLHeli_S (3D Mode) + DShot150 Bidirectional
  * Push-pull catamaran X-configuration
  *
  * Thruster layout (top view, bow = up):
@@ -44,7 +44,7 @@ enum MotorID : uint8_t { M_NW = 0, M_NE, M_SW, M_SE };
 // =====================================================================
 //  DShot Configuration
 // =====================================================================
-static constexpr dshot_mode_t DSHOT_MODE       = DSHOT300;
+static constexpr dshot_mode_t DSHOT_MODE       = DSHOT150;
 static constexpr bool         DSHOT_BIDIR      = true;   // telemetry enabled
 
 // =====================================================================

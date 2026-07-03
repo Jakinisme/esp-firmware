@@ -45,7 +45,7 @@ enum MotorID : uint8_t { M_NW = 0, M_NE, M_SW, M_SE };
 //  DShot Configuration
 // =====================================================================
 static constexpr dshot_mode_t DSHOT_MODE       = DSHOT300;
-static constexpr bool         DSHOT_BIDIR      = true;   // telemetry enabled
+static constexpr bool         DSHOT_BIDIR      = false;   // telemetry enabled
 
 // =====================================================================
 //  BLHeli_S 3D-Mode Throttle Ranges
@@ -65,16 +65,16 @@ static constexpr uint16_t THROT_3D_FWD_MAX  = 2047;  // fastest forward
 //  Motor Mixing Matrix
 //
 //  Row = motor,  Columns = [surge, sway, yaw]
-//  T_NW =  +surge  -sway  +yaw
-//  T_NE =  +surge  +sway  -yaw
-//  T_SW =  -surge  +sway  -yaw
-//  T_SE =  -surge  -sway  +yaw
+//  T_NW =  +surge  +sway  +yaw
+//  T_NE =  +surge  -sway  -yaw
+//  T_SW =  +surge  -sway  +yaw
+//  T_SE =  +surge  +sway  -yaw
 // =====================================================================
 static constexpr float MIX_MATRIX[NUM_MOTORS][3] = {
-    /* NW */ { +1.0f, -1.0f, +1.0f },
-    /* NE */ { +1.0f, +1.0f, -1.0f },
-    /* SW */ { -1.0f, +1.0f, -1.0f },
-    /* SE */ { -1.0f, -1.0f, +1.0f },
+    /* NW */ { +1.0f, +1.0f, +1.0f },
+    /* NE */ { +1.0f, -1.0f, -1.0f },
+    /* SW */ { +1.0f, -1.0f, +1.0f },
+    /* SE */ { +1.0f, +1.0f, -1.0f },
 };
 
 // =====================================================================

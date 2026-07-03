@@ -33,17 +33,23 @@ void MotorMixer::begin()
     };
     static const char* names[NUM_MOTORS] = { "NW", "NE", "SW", "SE" };
 
+    // RMT channels — one per motor (ESP32 has 8 channels: 0–7)
+    static constexpr rmt_channel_t rmt_ch[NUM_MOTORS] = {
+        RMT_CHANNEL_0, RMT_CHANNEL_1, RMT_CHANNEL_2, RMT_CHANNEL_3
+    };
+
     // ---- Create & initialise DShotRMT objects ----
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        motors_[i] = new DShotRMT(pins[i], DSHOT_MODE, DSHOT_BIDIR);
-        dshot_result_t res = motors_[i]->begin();
+        motors_[i] = new DShotRMT(pins[i], rmt_ch[i]);
+        // begin() returns esp_err_t cast to bool: ESP_OK (0) = success
+        bool ok = (motors_[i]->begin(DSHOT_MODE, DSHOT_BIDIR) == 0);
 
-        if (res.success) {
+        if (ok) {
             Serial.printf("[mixer] Motor %s (GPIO %d) — DShot OK\n",
                           names[i], pins[i]);
         } else {
-            Serial.printf("[mixer] Motor %s (GPIO %d) — DShot FAIL (%d)\n",
-                          names[i], pins[i], res.result_code);
+            Serial.printf("[mixer] Motor %s (GPIO %d) — DShot FAIL\n",
+                          names[i], pins[i]);
         }
     }
 
@@ -52,7 +58,7 @@ void MotorMixer::begin()
     uint32_t start = millis();
     while (millis() - start < ARMING_DURATION_MS) {
         for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-            motors_[i]->sendThrottle(0);   // DShot MOTOR_STOP command
+            motors_[i]->sendThrottleValue(0);   // DShot MOTOR_STOP command
         }
         delayMicroseconds(DSHOT_SEND_INTERVAL_US);
     }
@@ -82,14 +88,14 @@ void MotorMixer::update(float surge, float sway, float yaw)
     // ---- 2. Convert to DShot 3D-mode throttle & send ----
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
         throttle_[i] = thrustToThrottle3D(mixed_[i]);
-        motors_[i]->sendThrottle(throttle_[i]);
+        motors_[i]->sendThrottleValue(throttle_[i]);
     }
 }
 
 void MotorMixer::failsafe()
 {
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        motors_[i]->sendThrottle(0);   // MOTOR_STOP
+        motors_[i]->sendThrottleValue(0);   // MOTOR_STOP
         throttle_[i] = 0;
         mixed_[i]    = 0.0f;
     }
@@ -98,7 +104,7 @@ void MotorMixer::failsafe()
 void MotorMixer::sendIdle()
 {
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        motors_[i]->sendThrottle(THROT_3D_CENTER);
+        motors_[i]->sendThrottleValue(THROT_3D_CENTER);
         throttle_[i] = THROT_3D_CENTER;
         mixed_[i]    = 0.0f;
     }

@@ -1,0 +1,206 @@
+/**
+ * @file test_single_motor.cpp
+ * @brief Single motor test — GPIO 26 (Motor NE) only
+ *
+ * USAGE:
+ *   1. Rename main.cpp → main.cpp.disabled
+ *   2. Rename this file → test_single_motor.cpp  (remove .disabled)
+ *   3. Flash to ESP32
+ *   4. Open Serial Monitor (115200 baud)
+ *   5. Type a throttle value and press Enter:
+ *
+ *        0       → idle (3D center, no spin)
+ *        0.1     → slow forward
+ *        0.5     → medium forward
+ *        1.0     → full forward
+ *       -0.1     → slow reverse
+ *       -1.0     → full reverse
+ *        stop    → emergency stop (disarm)
+ *
+ *   Motor will spin for as long as you keep sending commands.
+ *   Failsafe stops the motor after 2 seconds of silence.
+ *
+ * WARNING: Secure the motor/prop before testing!
+ */
+
+#include <Arduino.h>
+#include <DShotRMT.h>
+
+// =====================================================================
+//  Configuration — edit these if needed
+// =====================================================================
+static constexpr gpio_num_t   TEST_PIN      = GPIO_NUM_26;   // Motor NE
+static constexpr rmt_channel_t TEST_RMT_CH  = RMT_CHANNEL_0;
+static constexpr dshot_mode_t  TEST_DSHOT    = DSHOT300;
+static constexpr bool          TEST_BIDIR   = false;
+
+// 3D-mode throttle constants
+static constexpr uint16_t THROT_3D_REV_MAX = 48;
+static constexpr uint16_t THROT_3D_REV_MIN = 1047;
+static constexpr uint16_t THROT_3D_CENTER  = 1048;
+static constexpr uint16_t THROT_3D_FWD_MIN = 1049;
+static constexpr uint16_t THROT_3D_FWD_MAX = 2047;
+
+static constexpr float    DEADZONE         = 0.03f;
+static constexpr uint32_t ARMING_MS        = 3000;
+static constexpr uint32_t FAILSAFE_MS      = 2000;
+static constexpr uint32_t DSHOT_INTERVAL_US = 500;    // ~2 kHz refresh
+static constexpr uint32_t STATUS_MS        = 200;     // print status 5 Hz
+
+// =====================================================================
+//  Globals
+// =====================================================================
+static DShotRMT* motor = nullptr;
+static uint16_t  currentThrottle = THROT_3D_CENTER;
+static uint32_t  lastCmdMs   = 0;
+static uint32_t  lastSendUs  = 0;
+static uint32_t  lastPrintMs = 0;
+static bool      failsafe    = false;
+
+// =====================================================================
+//  Throttle conversion (same as motor_mixer.cpp)
+// =====================================================================
+static uint16_t thrustToThrottle3D(float thrust)
+{
+    if (fabsf(thrust) < DEADZONE) {
+        return THROT_3D_CENTER;   // idle, no spin
+    }
+    thrust = fmaxf(-1.0f, fminf(1.0f, thrust));
+
+    if (thrust > 0.0f) {
+        uint16_t range = THROT_3D_FWD_MAX - THROT_3D_FWD_MIN;
+        return static_cast<uint16_t>(THROT_3D_FWD_MIN + thrust * range);
+    } else {
+        uint16_t range = THROT_3D_REV_MIN - THROT_3D_REV_MAX;
+        return static_cast<uint16_t>(THROT_3D_REV_MIN + thrust * range);
+    }
+}
+
+// =====================================================================
+//  Serial command reader
+// =====================================================================
+static char inputBuf[64];
+static uint8_t inputPos = 0;
+
+static bool readSerialCommand(float& out)
+{
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r') {
+            if (inputPos > 0) {
+                inputBuf[inputPos] = '\0';
+
+                // Check for "stop" command
+                if (strcmp(inputBuf, "stop") == 0) {
+                    out = 0.0f;
+                    inputPos = 0;
+                    Serial.println("[test] STOP → sending disarm (value 0)");
+                    motor->sendThrottleValue(0);
+                    return false;   // handled specially
+                }
+
+                // Parse float
+                char* end = nullptr;
+                float v = strtof(inputBuf, &end);
+                if (end != inputBuf) {
+                    out = constrain(v, -1.0f, 1.0f);
+                    inputPos = 0;
+                    return true;
+                }
+
+                Serial.printf("[test] Invalid input: '%s'\n", inputBuf);
+                Serial.println("[test] Use: 0, 0.1, 0.5, 1.0, -0.5, stop");
+                inputPos = 0;
+            }
+        } else {
+            if (inputPos < sizeof(inputBuf) - 1) {
+                inputBuf[inputPos++] = c;
+            }
+        }
+    }
+    return false;
+}
+
+// =====================================================================
+//  Setup
+// =====================================================================
+void setup()
+{
+    Serial.begin(115200);
+    delay(500);
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("  SINGLE MOTOR TEST — GPIO 26 (NE)");
+    Serial.println("  DShot300 | BLHeli_S 3D Mode");
+    Serial.println("========================================");
+    Serial.println();
+
+    // Init DShot
+    motor = new DShotRMT(TEST_PIN, TEST_RMT_CH);
+    bool ok = (motor->begin(TEST_DSHOT, TEST_BIDIR) == 0);
+    Serial.printf("[test] DShot init: %s\n", ok ? "OK" : "FAIL");
+
+    if (!ok) {
+        Serial.println("[test] FATAL: DShot init failed. Halting.");
+        while (true) { delay(1000); }
+    }
+
+    // Arming: send 3D-center for 3 seconds
+    Serial.printf("[test] Arming ESC (%lu ms) ...\n", ARMING_MS);
+    uint32_t start = millis();
+    while (millis() - start < ARMING_MS) {
+        motor->sendThrottleValue(THROT_3D_CENTER);
+        delayMicroseconds(DSHOT_INTERVAL_US);
+    }
+    Serial.println("[test] ESC armed ✓");
+    Serial.println();
+    Serial.println("Ready! Type a throttle value (-1.0 to 1.0) and Enter.");
+    Serial.println("  0     = idle (no spin)");
+    Serial.println("  0.3   = 30% forward");
+    Serial.println("  -0.3  = 30% reverse");
+    Serial.println("  stop  = emergency disarm");
+    Serial.println();
+
+    lastCmdMs = millis();
+}
+
+// =====================================================================
+//  Loop
+// =====================================================================
+void loop()
+{
+    uint32_t nowMs = millis();
+    uint32_t nowUs = micros();
+
+    // ---- 1. Read serial command ----
+    float thrust;
+    if (readSerialCommand(thrust)) {
+        currentThrottle = thrustToThrottle3D(thrust);
+        lastCmdMs = nowMs;
+        failsafe = false;
+
+        Serial.printf("[test] Thrust=%.2f → DShot=%u\n", thrust, currentThrottle);
+    }
+
+    // ---- 2. Failsafe (no input for 2s → idle) ----
+    if (!failsafe && (nowMs - lastCmdMs >= FAILSAFE_MS)) {
+        failsafe = true;
+        currentThrottle = THROT_3D_CENTER;
+        Serial.println("[test] ⚠ Failsafe — motor idle (send new value to resume)");
+    }
+
+    // ---- 3. Continuous DShot send ----
+    if (nowUs - lastSendUs >= DSHOT_INTERVAL_US) {
+        lastSendUs = nowUs;
+        motor->sendThrottleValue(currentThrottle);
+    }
+
+    // ---- 4. Status print ----
+    if (nowMs - lastPrintMs >= STATUS_MS) {
+        lastPrintMs = nowMs;
+        Serial.printf("[status] throttle=%u  failsafe=%s\n",
+                      currentThrottle,
+                      failsafe ? "YES" : "no");
+    }
+}

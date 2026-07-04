@@ -1,6 +1,9 @@
 /**
  * @file motor_mixer.cpp
  * @brief Motor mixing implementation for push-pull catamaran (X-config)
+ *
+ * Uses ESP32 LEDC peripheral to generate 50 Hz PWM for BLHeli_S ESCs
+ * in 3D mode.  PWM range: 1000–2000 µs, center 1500 µs.
  */
 
 #include "lib/motor_mixer.h"
@@ -14,10 +17,123 @@
 MotorMixer::MotorMixer()
     : armed_(false)
 {
+    // Pin table — order matches MotorID enum (NW, NE, SW, SE)
+    pins_[M_NW] = PIN_MOTOR_NW;
+    pins_[M_NE] = PIN_MOTOR_NE;
+    pins_[M_SW] = PIN_MOTOR_SW;
+    pins_[M_SE] = PIN_MOTOR_SE;
+
+    // LEDC channel table
+    ledcChannels_[M_NW] = LEDC_CH_NW;
+    ledcChannels_[M_NE] = LEDC_CH_NE;
+    ledcChannels_[M_SW] = LEDC_CH_SW;
+    ledcChannels_[M_SE] = LEDC_CH_SE;
+
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        motors_[i]    = nullptr;
-        throttle_[i]  = 0;
-        mixed_[i]     = 0.0f;
+        pulseUs_[i]       = PWM_CENTER_US;
+        targetPulseUs_[i] = PWM_CENTER_US;
+        mixed_[i]         = 0.0f;
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  PWM helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert microseconds to LEDC duty value.
+ * At 50 Hz (20 ms period) with 16-bit resolution (65536 steps):
+ *   duty = pulseUs * 65535 / 20000
+ */
+void MotorMixer::writePulse(uint8_t motorIdx, uint16_t pulseUs)
+{
+    pulseUs_[motorIdx] = pulseUs;
+    targetPulseUs_[motorIdx] = pulseUs;   // direct write — sync target too
+    uint32_t duty = (uint32_t)pulseUs * ((1 << PWM_RESOLUTION) - 1) / 20000;
+    ledcWrite(ledcChannels_[motorIdx], duty);
+}
+
+/**
+ * Slew-rate-limited pulse writer.
+ * Moves pulseUs_ toward targetPulseUs_ by at most MOTOR_SLEW_RATE_US
+ * per call, then writes the result to the LEDC hardware.
+ *
+ * Called once per update cycle (every PWM_UPDATE_MS ≈ 20 ms).
+ * At 25 µs/step × 50 Hz = ramp from 1500→2000 in ~0.4 s.
+ */
+void MotorMixer::writeRampedPulse(uint8_t motorIdx)
+{
+    uint16_t current = pulseUs_[motorIdx];
+    uint16_t target  = targetPulseUs_[motorIdx];
+
+    if (current == target) return;
+
+    // Snap to exact center when idle — prevents hunting at ESC deadband edge
+    if (target == PWM_CENTER_US
+        && abs((int16_t)current - (int16_t)PWM_CENTER_US) <= (int16_t)MOTOR_NEUTRAL_BAND_US) {
+        pulseUs_[motorIdx] = PWM_CENTER_US;
+        uint32_t duty = (uint32_t)PWM_CENTER_US * ((1 << PWM_RESOLUTION) - 1) / 20000;
+        ledcWrite(ledcChannels_[motorIdx], duty);
+        return;
+    }
+
+    int16_t diff = (int16_t)target - (int16_t)current;
+
+    // Slower slew only when LEAVING center (not when returning to it)
+    uint16_t maxStep = MOTOR_SLEW_RATE_US;
+    if (target != PWM_CENTER_US
+        && abs((int16_t)current - (int16_t)PWM_CENTER_US) <= (int16_t)MOTOR_NEUTRAL_BAND_US) {
+        maxStep = MOTOR_NEUTRAL_EXIT_SLEW_US;
+    }
+
+    if (diff > (int16_t)maxStep) {
+        current += maxStep;
+    } else if (diff < -(int16_t)maxStep) {
+        current -= maxStep;
+    } else {
+        current = target;
+    }
+
+    pulseUs_[motorIdx] = current;
+    uint32_t duty = (uint32_t)current * ((1 << PWM_RESOLUTION) - 1) / 20000;
+    ledcWrite(ledcChannels_[motorIdx], duty);
+}
+
+void MotorMixer::rampAllBlocking(uint16_t targetUs, uint16_t stepUs, uint32_t intervalMs)
+{
+    bool done = false;
+    while (!done) {
+        done = true;
+        for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
+            uint16_t current = pulseUs_[i];
+            if (current == targetUs) continue;
+
+            done = false;
+            int16_t diff = (int16_t)targetUs - (int16_t)current;
+            if (diff > (int16_t)stepUs) {
+                current += stepUs;
+            } else if (diff < -(int16_t)stepUs) {
+                current -= stepUs;
+            } else {
+                current = targetUs;
+            }
+
+            pulseUs_[i]       = current;
+            targetPulseUs_[i] = current;
+            uint32_t duty = (uint32_t)current * ((1 << PWM_RESOLUTION) - 1) / 20000;
+            ledcWrite(ledcChannels_[i], duty);
+        }
+        if (!done) {
+            delay(intervalMs);
+        }
+    }
+}
+
+void MotorMixer::tick()
+{
+    if (!armed_) return;
+    for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
+        writeRampedPulse(i);
     }
 }
 
@@ -27,41 +143,38 @@ MotorMixer::MotorMixer()
 
 void MotorMixer::begin()
 {
-    // GPIO pin table — order must match MotorID enum (NW, NE, SW, SE)
-    static constexpr gpio_num_t pins[NUM_MOTORS] = {
-        PIN_MOTOR_NW, PIN_MOTOR_NE, PIN_MOTOR_SW, PIN_MOTOR_SE
-    };
     static const char* names[NUM_MOTORS] = { "NW", "NE", "SW", "SE" };
 
-    // RMT channels — one per motor (ESP32 has 8 channels: 0–7)
-    static constexpr rmt_channel_t rmt_ch[NUM_MOTORS] = {
-        RMT_CHANNEL_0, RMT_CHANNEL_1, RMT_CHANNEL_2, RMT_CHANNEL_3
-    };
-
-    // ---- Create & initialise DShotRMT objects ----
+    // ---- Setup LEDC channels ----
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        motors_[i] = new DShotRMT(pins[i], rmt_ch[i]);
-        // begin() returns esp_err_t cast to bool: ESP_OK (0) = success
-        bool ok = (motors_[i]->begin(DSHOT_MODE, DSHOT_BIDIR) == 0);
-
-        if (ok) {
-            Serial.printf("[mixer] Motor %s (GPIO %d) — DShot OK\n",
-                          names[i], pins[i]);
-        } else {
-            Serial.printf("[mixer] Motor %s (GPIO %d) — DShot FAIL\n",
-                          names[i], pins[i]);
-        }
+        ledcSetup(ledcChannels_[i], PWM_FREQ, PWM_RESOLUTION);
+        ledcAttachPin(pins_[i], ledcChannels_[i]);
+        Serial.printf("[mixer] Motor %s (GPIO %d, LEDC ch%d) — PWM OK\n",
+                      names[i], pins_[i], ledcChannels_[i]);
     }
 
-    // ---- Arming sequence: send motor-stop for ARMING_DURATION_MS ----
-    Serial.printf("[mixer] Arming ESCs (%lu ms) ...\n", ARMING_DURATION_MS);
-    uint32_t start = millis();
-    while (millis() - start < ARMING_DURATION_MS) {
-        for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-            motors_[i]->sendThrottleValue(0);   // DShot MOTOR_STOP command
-        }
-        delayMicroseconds(DSHOT_SEND_INTERVAL_US);
+    // Phase 1: Send 3D center (1500 µs) — ESC recognises valid signal
+    Serial.printf("[mixer] Arming phase 1 — center (%u µs) for %lu ms ...\n",
+                  PWM_CENTER_US, ARMING_DURATION_MS);
+    for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
+        writePulse(i, PWM_CENTER_US);
     }
+    delay(ARMING_DURATION_MS);
+
+    // Phase 2: Send min throttle (1000 µs) — required for ESC arm confirmation
+    // The ESC needs to see the full range (center → min) to complete arming.
+    // Without this, the ESC stays in "signal detected" state but never arms.
+    Serial.printf("[mixer] Arming phase 2 — min (%u µs) for %lu ms ...\n",
+                  PWM_MIN_US, ARMING_LOW_DURATION_MS);
+    for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
+        writePulse(i, PWM_MIN_US);
+    }
+    delay(ARMING_LOW_DURATION_MS);
+
+    // Ramp back to center — instant 1000→1500 jump disarms BLHeli_S 3D ESCs
+    Serial.printf("[mixer] Arming return — ramp min→center (%u µs) over %lu ms ...\n",
+                  PWM_CENTER_US, ARM_RETURN_RAMP_MS);
+    rampAllBlocking(PWM_CENTER_US, MOTOR_NEUTRAL_EXIT_SLEW_US, PWM_UPDATE_MS);
 
     armed_ = true;
     Serial.println("[mixer] ESCs armed ✓");
@@ -85,28 +198,53 @@ void MotorMixer::update(float surge, float sway, float yaw)
         mixed_[i] = fmaxf(-1.0f, fminf(1.0f, raw));
     }
 
-    // ---- 2. Convert to DShot 3D-mode throttle & send ----
+    // ---- 2. Set target PWM (actual output applied in tick()) ----
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        throttle_[i] = thrustToThrottle3D(mixed_[i]);
-        motors_[i]->sendThrottleValue(throttle_[i]);
+        targetPulseUs_[i] = thrustToPulse3D(mixed_[i]);
     }
 }
 
 void MotorMixer::failsafe()
 {
+    // Ramp to center — instant snap causes ESC signal-loss / re-init
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        motors_[i]->sendThrottleValue(0);   // MOTOR_STOP
-        throttle_[i] = 0;
-        mixed_[i]    = 0.0f;
+        targetPulseUs_[i] = PWM_CENTER_US;
+        mixed_[i] = 0.0f;
     }
 }
 
 void MotorMixer::sendIdle()
 {
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        motors_[i]->sendThrottleValue(THROT_3D_CENTER);
-        throttle_[i] = THROT_3D_CENTER;
-        mixed_[i]    = 0.0f;
+        targetPulseUs_[i] = PWM_CENTER_US;
+        mixed_[i] = 0.0f;
+    }
+}
+
+bool MotorMixer::isCommandIdle(float surge, float sway, float yaw)
+{
+    return fabsf(surge) <= MOTOR_DEADZONE
+        && fabsf(sway)  <= MOTOR_DEADZONE
+        && fabsf(yaw)   <= MOTOR_DEADZONE;
+}
+
+void MotorMixer::holdNeutral()
+{
+    bool allInBand = true;
+
+    for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
+        targetPulseUs_[i] = PWM_CENTER_US;
+        mixed_[i] = 0.0f;
+        if (abs((int16_t)pulseUs_[i] - (int16_t)PWM_CENTER_US) > (int16_t)MOTOR_NEUTRAL_BAND_US) {
+            allInBand = false;
+        }
+    }
+
+    // Lock exact center once settled — prevents ESC deadband hunting at ~1520/1480
+    if (allInBand) {
+        for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
+            writePulse(i, PWM_CENTER_US);
+        }
     }
 }
 
@@ -116,7 +254,7 @@ void MotorMixer::sendIdle()
 
 void MotorMixer::getThrottleValues(uint16_t out[NUM_MOTORS]) const
 {
-    for (uint8_t i = 0; i < NUM_MOTORS; ++i) out[i] = throttle_[i];
+    for (uint8_t i = 0; i < NUM_MOTORS; ++i) out[i] = pulseUs_[i];
 }
 
 void MotorMixer::getMixedValues(float out[NUM_MOTORS]) const
@@ -125,29 +263,22 @@ void MotorMixer::getMixedValues(float out[NUM_MOTORS]) const
 }
 
 // ---------------------------------------------------------------------------
-//  3D-mode throttle conversion
+//  3D-mode PWM conversion
 // ---------------------------------------------------------------------------
 
-uint16_t MotorMixer::thrustToThrottle3D(float thrust)
+uint16_t MotorMixer::thrustToPulse3D(float thrust)
 {
-    // Deadzone → idle
-    if (fabsf(thrust) < MOTOR_DEADZONE) {
-        return 0;   // motor stop (not spinning)
+    // Deadzone → center (neutral, no spin). Use <= so ±deadzone never maps to ±15 µs.
+    if (fabsf(thrust) <= MOTOR_DEADZONE) {
+        return PWM_CENTER_US;
     }
 
-    // Clamp just in case
+    // Clamp
     thrust = fmaxf(-1.0f, fminf(1.0f, thrust));
 
-    if (thrust > 0.0f) {
-        // Forward: map (0, 1] → [THROT_3D_FWD_MIN, THROT_3D_FWD_MAX]
-        //   thrust=small → 1049,  thrust=1.0 → 2047
-        uint16_t range = THROT_3D_FWD_MAX - THROT_3D_FWD_MIN;   // 998
-        return static_cast<uint16_t>(THROT_3D_FWD_MIN + thrust * range);
-    } else {
-        // Reverse: map [-1, 0) → [THROT_3D_REV_MAX, THROT_3D_REV_MIN]
-        //   thrust=-small → 1047,  thrust=-1.0 → 48
-        //   Formula: 1047 + thrust * (1047 - 48)  = 1047 + thrust * 999
-        uint16_t range = THROT_3D_REV_MIN - THROT_3D_REV_MAX;   // 999
-        return static_cast<uint16_t>(THROT_3D_REV_MIN + thrust * range);
-    }
+    // Linear map:
+    //   thrust  0 → 1500 µs (center)
+    //   thrust +1 → 2000 µs (full forward)
+    //   thrust -1 → 1000 µs (full reverse)
+    return (uint16_t)(PWM_CENTER_US + thrust * 500.0f);
 }

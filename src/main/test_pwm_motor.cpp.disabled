@@ -1,0 +1,209 @@
+/**
+ * @file test_pwm_motor.cpp
+ * @brief FULL-SWEEP PWM Test — GPIO 26
+ *
+ * Sweeps PWM from 1000µs → 2000µs slowly.
+ * In ANY ESC mode (normal or 3D), the motor MUST spin at some point.
+ *
+ * This test tells you:
+ *   - At what µs value the motor starts spinning
+ *   - Whether it's normal mode or 3D mode based on that
+ *
+ * Sequence:
+ *   1. Arm at 1500µs for 3 sec (3D center)
+ *   2. Then arm at 1000µs for 3 sec (normal min)
+ *   3. Slowly sweep 1000 → 2000µs over 10 seconds
+ *   4. Hold 2000µs for 2 sec
+ *   5. Sweep back 2000 → 1000µs over 10 seconds
+ *   6. Pause, repeat
+ *
+ * Watch serial output to see the exact µs when motor starts!
+ *
+ * WARNING: REMOVE PROPELLER! Motor WILL spin!
+ */
+
+#include <Arduino.h>
+
+// =====================================================================
+//  Config
+// =====================================================================
+static constexpr uint8_t  MOTOR_PIN = 26;
+static constexpr uint8_t  LEDC_CH   = 0;
+static constexpr uint32_t PWM_FREQ  = 50;
+static constexpr uint8_t  PWM_RES   = 16;
+static constexpr uint8_t  LED_PIN   = 2;
+
+// Sweep range
+static constexpr uint16_t SWEEP_MIN = 1350;
+static constexpr uint16_t SWEEP_MAX = 1650;
+
+// Timing
+static constexpr uint32_t ARM_3D_MS      = 3000;    // arm at 1500µs
+static constexpr uint32_t ARM_NORMAL_MS  = 3000;    // arm at 1000µs
+static constexpr uint32_t SWEEP_UP_MS    = 10000;   // 10 sec sweep up
+static constexpr uint32_t HOLD_MAX_MS    = 2000;    // hold at max
+static constexpr uint32_t SWEEP_DOWN_MS  = 10000;   // 10 sec sweep down
+static constexpr uint32_t PAUSE_MS       = 5000;    // pause between cycles
+
+// =====================================================================
+//  PWM helpers
+// =====================================================================
+static uint16_t currentPulseUs = 1500;
+
+static uint32_t usToDuty(uint16_t pulseUs)
+{
+    return (uint32_t)pulseUs * ((1 << PWM_RES) - 1) / 20000;
+}
+
+static void writePulse(uint16_t pulseUs)
+{
+    currentPulseUs = pulseUs;
+    ledcWrite(LEDC_CH, usToDuty(pulseUs));
+}
+
+// =====================================================================
+//  State machine
+// =====================================================================
+enum Phase {
+    PH_ARM_3D,         // send 1500µs (3D center)
+    PH_ARM_NORMAL,     // send 1000µs (normal min)
+    PH_SWEEP_UP,       // 1000 → 2000 slowly
+    PH_HOLD_MAX,       // hold 2000µs
+    PH_SWEEP_DOWN,     // 2000 → 1000 slowly
+    PH_PAUSE,          // rest
+};
+
+static Phase    phase      = PH_ARM_3D;
+static uint32_t phaseStart = 0;
+static uint32_t lastPrint  = 0;
+static int      cycle      = 0;
+
+static const char* phaseStr(Phase p) {
+    switch(p) {
+        case PH_ARM_3D:      return "ARM-3D(1500)";
+        case PH_ARM_NORMAL:  return "ARM-NORMAL(1000)";
+        case PH_SWEEP_UP:    return "SWEEP-UP";
+        case PH_HOLD_MAX:    return "HOLD-MAX";
+        case PH_SWEEP_DOWN:  return "SWEEP-DOWN";
+        case PH_PAUSE:       return "PAUSE";
+        default:             return "???";
+    }
+}
+
+static void setPhase(Phase p) {
+    phase = p;
+    phaseStart = millis();
+    Serial.printf("\n====== %s ======\n", phaseStr(p));
+}
+
+// =====================================================================
+//  Setup
+// =====================================================================
+void setup()
+{
+    Serial.begin(115200);
+    pinMode(LED_PIN, OUTPUT);
+    delay(500);
+
+    Serial.println();
+    Serial.println("╔══════════════════════════════════════╗");
+    Serial.println("║  FULL-SWEEP PWM TEST — GPIO 26      ║");
+    Serial.println("║  Sweeps 1000µs → 2000µs             ║");
+    Serial.println("║  Motor WILL spin! REMOVE PROP!       ║");
+    Serial.println("╚══════════════════════════════════════╝");
+    Serial.println();
+    Serial.println("Watch for when motor starts spinning!");
+    Serial.println("The µs value tells you the ESC mode.");
+    Serial.println();
+
+    // Setup LEDC PWM
+    ledcSetup(LEDC_CH, PWM_FREQ, PWM_RES);
+    ledcAttachPin(MOTOR_PIN, LEDC_CH);
+
+    // Start with 3D-mode arming (1500µs)
+    writePulse(1500);
+    setPhase(PH_ARM_3D);
+}
+
+// =====================================================================
+//  Loop
+// =====================================================================
+void loop()
+{
+    uint32_t now = millis();
+    uint32_t elapsed = now - phaseStart;
+
+    switch (phase) {
+
+        // ---- Arm at 1500µs (3D center) ----
+        case PH_ARM_3D:
+            writePulse(1500);
+            if (elapsed >= ARM_3D_MS) {
+                setPhase(PH_ARM_NORMAL);
+            }
+            break;
+
+        // ---- Arm at 1000µs (normal min) ----
+        case PH_ARM_NORMAL:
+            writePulse(1000);
+            if (elapsed >= ARM_NORMAL_MS) {
+                Serial.println("\n>>> STARTING SWEEP — watch for motor spin! <<<\n");
+                digitalWrite(LED_PIN, HIGH);
+                setPhase(PH_SWEEP_UP);
+            }
+            break;
+
+        // ---- Sweep 1000 → 2000 ----
+        case PH_SWEEP_UP: {
+            float progress = (float)elapsed / SWEEP_UP_MS;
+            if (progress > 1.0f) progress = 1.0f;
+            uint16_t pulse = SWEEP_MIN + (uint16_t)(progress * (SWEEP_MAX - SWEEP_MIN));
+            writePulse(pulse);
+
+            if (elapsed >= SWEEP_UP_MS) {
+                setPhase(PH_HOLD_MAX);
+            }
+            break;
+        }
+
+        // ---- Hold max ----
+        case PH_HOLD_MAX:
+            writePulse(SWEEP_MAX);
+            if (elapsed >= HOLD_MAX_MS) {
+                setPhase(PH_SWEEP_DOWN);
+            }
+            break;
+
+        // ---- Sweep 2000 → 1000 ----
+        case PH_SWEEP_DOWN: {
+            float progress = (float)elapsed / SWEEP_DOWN_MS;
+            if (progress > 1.0f) progress = 1.0f;
+            uint16_t pulse = SWEEP_MAX - (uint16_t)(progress * (SWEEP_MAX - SWEEP_MIN));
+            writePulse(pulse);
+
+            if (elapsed >= SWEEP_DOWN_MS) {
+                writePulse(1000);
+                digitalWrite(LED_PIN, LOW);
+                setPhase(PH_PAUSE);
+            }
+            break;
+        }
+
+        // ---- Pause ----
+        case PH_PAUSE:
+            writePulse(1000);
+            if (elapsed >= PAUSE_MS) {
+                cycle++;
+                Serial.printf("\n===== CYCLE %d =====\n", cycle + 1);
+                writePulse(1500);
+                setPhase(PH_ARM_3D);
+            }
+            break;
+    }
+
+    // ---- Status print every 200ms ----
+    if (now - lastPrint >= 200) {
+        lastPrint = now;
+        Serial.printf("[%s] %u µs\n", phaseStr(phase), currentPulseUs);
+    }
+}

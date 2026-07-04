@@ -1,0 +1,330 @@
+/**
+ * @file test_dshot_raw.cpp
+ * @brief Raw DShot300 test — GPIO 26 — NO external library
+ *
+ * Direct RMT implementation of DShot300 protocol.
+ * Fixes bugs in DShotRMT library:
+ *   1. Correct bit timing (33 ticks vs 32)
+ *   2. Proper end-of-frame marker
+ *   3. Can send value 0 (motor stop)
+ *
+ * Sequence (same as working PWM test):
+ *   1. Wait 2 sec for ESC boot
+ *   2. Send DShot 1048 (3D center) for 4 sec arming
+ *   3. Sweep throttle 1048 → 1548 → 1048 (forward test)
+ *   4. Hold idle, repeat
+ *
+ * WARNING: REMOVE PROPELLER!
+ */
+
+#include <Arduino.h>
+#include <driver/rmt.h>
+
+// =====================================================================
+//  DShot300 timing — calculated from spec
+//
+//  RMT clock: 80 MHz / 8 = 10 MHz → 100ns per tick
+//  DShot300 bit rate: 300 kbit/s → bit period 3.333µs
+//
+//  Bit 1: HIGH 2.50µs (75%), LOW 0.83µs (25%)
+//  Bit 0: HIGH 1.25µs (37.5%), LOW 2.08µs (62.5%)
+// =====================================================================
+static constexpr uint8_t  RMT_CLK_DIV      = 8;       // 100ns per tick
+
+// Exact timing for DSHOT300 (rounded to nearest tick)
+static constexpr uint16_t DSHOT_BIT_PERIOD  = 33;      // 3.3µs ≈ 3.333µs
+static constexpr uint16_t DSHOT_1_HIGH      = 25;      // 2.5µs
+static constexpr uint16_t DSHOT_1_LOW       = 8;       // 0.8µs
+static constexpr uint16_t DSHOT_0_HIGH      = 13;      // 1.3µs
+static constexpr uint16_t DSHOT_0_LOW       = 20;      // 2.0µs
+
+// Frame = 16 data bits + end marker
+static constexpr uint8_t  DSHOT_FRAME_LEN   = 17;
+
+// =====================================================================
+//  Config
+// =====================================================================
+static constexpr gpio_num_t    MOTOR_PIN  = GPIO_NUM_26;
+static constexpr rmt_channel_t RMT_CH     = RMT_CHANNEL_0;
+static constexpr uint8_t       LED_PIN    = 2;
+
+// 3D throttle values
+static constexpr uint16_t THROT_CENTER    = 1048;
+static constexpr uint16_t THROT_FWD_MIN   = 1049;
+static constexpr uint16_t THROT_FWD_MAX   = 2047;
+
+// Timing
+static constexpr uint32_t BOOT_DELAY_MS   = 2000;
+static constexpr uint32_t ARMING_MS       = 4000;
+static constexpr uint32_t DSHOT_INTERVAL_US = 1000;    // 1 kHz send rate
+static constexpr uint32_t STATUS_MS       = 250;
+
+// Test sweep
+static constexpr uint16_t SWEEP_TARGET    = 1548;      // ~50% forward in 3D
+static constexpr uint32_t SWEEP_UP_MS     = 5000;
+static constexpr uint32_t HOLD_MS         = 3000;
+static constexpr uint32_t SWEEP_DOWN_MS   = 3000;
+static constexpr uint32_t PAUSE_MS        = 3000;
+
+// =====================================================================
+//  RMT DShot frame buffer
+// =====================================================================
+static rmt_item32_t dshotFrame[DSHOT_FRAME_LEN];
+
+// =====================================================================
+//  DShot packet builder
+// =====================================================================
+
+/**
+ * Build a 16-bit DShot frame:
+ *   [11-bit throttle] [1-bit telemetry] [4-bit CRC]
+ *
+ * Then encode as RMT items.
+ */
+static void buildDShotFrame(uint16_t throttle, bool telemetry = false)
+{
+    // Clamp throttle to 11-bit range
+    if (throttle > 2047) throttle = 2047;
+
+    // Build 12-bit packet (throttle + telemetry)
+    uint16_t packet = (throttle << 1) | (telemetry ? 1 : 0);
+
+    // Calculate CRC (non-bidirectional)
+    uint16_t crc = (packet ^ (packet >> 4) ^ (packet >> 8)) & 0x0F;
+
+    // Full 16-bit frame
+    uint16_t frame = (packet << 4) | crc;
+
+    // Encode each bit as an RMT item (MSB first)
+    for (int i = 0; i < 16; i++) {
+        if (frame & (1 << (15 - i))) {
+            // Bit 1: long HIGH, short LOW
+            dshotFrame[i].level0    = 1;
+            dshotFrame[i].duration0 = DSHOT_1_HIGH;
+            dshotFrame[i].level1    = 0;
+            dshotFrame[i].duration1 = DSHOT_1_LOW;
+        } else {
+            // Bit 0: short HIGH, long LOW
+            dshotFrame[i].level0    = 1;
+            dshotFrame[i].duration0 = DSHOT_0_HIGH;
+            dshotFrame[i].level1    = 0;
+            dshotFrame[i].duration1 = DSHOT_0_LOW;
+        }
+    }
+
+    // End marker — signals RMT to stop transmission
+    dshotFrame[16].level0    = 0;
+    dshotFrame[16].duration0 = 0;
+    dshotFrame[16].level1    = 0;
+    dshotFrame[16].duration1 = 0;
+}
+
+// =====================================================================
+//  RMT init & send
+// =====================================================================
+static bool rmtInitialized = false;
+
+static bool initRMT()
+{
+    rmt_config_t config = {};
+    config.rmt_mode              = RMT_MODE_TX;
+    config.channel               = RMT_CH;
+    config.gpio_num              = MOTOR_PIN;
+    config.mem_block_num         = 1;    // 1 block = 64 items, plenty for 17
+    config.clk_div               = RMT_CLK_DIV;
+    config.tx_config.loop_en     = false;
+    config.tx_config.carrier_en  = false;
+    config.tx_config.idle_output_en = true;
+    config.tx_config.idle_level  = RMT_IDLE_LEVEL_LOW;  // idle LOW for DShot
+
+    esp_err_t err = rmt_config(&config);
+    if (err != ESP_OK) {
+        Serial.printf("[dshot] rmt_config failed: %d\n", err);
+        return false;
+    }
+
+    err = rmt_driver_install(RMT_CH, 0, 0);
+    if (err != ESP_OK) {
+        Serial.printf("[dshot] rmt_driver_install failed: %d\n", err);
+        return false;
+    }
+
+    rmtInitialized = true;
+    return true;
+}
+
+static void sendDShot(uint16_t throttle)
+{
+    if (!rmtInitialized) return;
+
+    buildDShotFrame(throttle);
+
+    // Wait for any previous TX to complete
+    rmt_wait_tx_done(RMT_CH, pdMS_TO_TICKS(10));
+
+    // Send the frame
+    rmt_write_items(RMT_CH, dshotFrame, DSHOT_FRAME_LEN, false);
+}
+
+// =====================================================================
+//  Test state machine
+// =====================================================================
+enum Phase {
+    PH_BOOT_WAIT,
+    PH_ARMING,
+    PH_SWEEP_UP,
+    PH_HOLD,
+    PH_SWEEP_DOWN,
+    PH_PAUSE,
+};
+
+static Phase    phase       = PH_BOOT_WAIT;
+static uint32_t phaseStart  = 0;
+static uint32_t lastSendUs  = 0;
+static uint32_t lastPrintMs = 0;
+static uint16_t currentThrottle = THROT_CENTER;
+static int      cycle       = 0;
+
+static const char* phaseStr(Phase p) {
+    switch(p) {
+        case PH_BOOT_WAIT: return "BOOT-WAIT";
+        case PH_ARMING:    return "ARMING";
+        case PH_SWEEP_UP:  return "SWEEP-UP";
+        case PH_HOLD:      return "HOLD";
+        case PH_SWEEP_DOWN:return "SWEEP-DOWN";
+        case PH_PAUSE:     return "PAUSE";
+        default:           return "???";
+    }
+}
+
+static void setPhase(Phase p) {
+    phase = p;
+    phaseStart = millis();
+    Serial.printf("\n====== %s ======\n", phaseStr(p));
+}
+
+// =====================================================================
+//  Setup
+// =====================================================================
+void setup()
+{
+    Serial.begin(115200);
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    delay(500);
+
+    Serial.println();
+    Serial.println("╔══════════════════════════════════════╗");
+    Serial.println("║  RAW DShot300 TEST — GPIO 26         ║");
+    Serial.println("║  Direct RMT, no external library     ║");
+    Serial.println("║  REMOVE PROP!                        ║");
+    Serial.println("╚══════════════════════════════════════╝");
+    Serial.println();
+
+    // Print timing info
+    Serial.printf("[dshot] Bit period : %u ticks (%.1f µs)\n",
+                  DSHOT_BIT_PERIOD, DSHOT_BIT_PERIOD * 0.1f);
+    Serial.printf("[dshot] Bit-1 HIGH : %u ticks (%.1f µs)\n",
+                  DSHOT_1_HIGH, DSHOT_1_HIGH * 0.1f);
+    Serial.printf("[dshot] Bit-0 HIGH : %u ticks (%.1f µs)\n",
+                  DSHOT_0_HIGH, DSHOT_0_HIGH * 0.1f);
+    Serial.println();
+
+    // Wait for ESC to boot before sending any signal
+    Serial.printf("[dshot] Waiting %lu ms for ESC boot (no signal) ...\n", BOOT_DELAY_MS);
+    setPhase(PH_BOOT_WAIT);
+}
+
+// =====================================================================
+//  Loop
+// =====================================================================
+void loop()
+{
+    uint32_t nowMs = millis();
+    uint32_t nowUs = micros();
+    uint32_t elapsed = nowMs - phaseStart;
+
+    // ---- Phase machine ----
+    switch (phase) {
+
+        case PH_BOOT_WAIT:
+            // Don't send anything — let ESC boot cleanly
+            if (elapsed >= BOOT_DELAY_MS) {
+                // Now init RMT
+                if (!initRMT()) {
+                    Serial.println("[dshot] FATAL: RMT init failed!");
+                    while(true) delay(1000);
+                }
+                Serial.println("[dshot] RMT initialized ✓");
+                Serial.printf("[dshot] Arming — sending center (%u) for %lu ms ...\n",
+                              THROT_CENTER, ARMING_MS);
+                currentThrottle = THROT_CENTER;
+                setPhase(PH_ARMING);
+            }
+            return;   // don't send anything during boot
+
+        case PH_ARMING:
+            currentThrottle = THROT_CENTER;
+            if (elapsed >= ARMING_MS) {
+                Serial.println("[dshot] Armed ✓");
+                Serial.printf("[dshot] Sweeping center(%u) → %u ...\n",
+                              THROT_CENTER, SWEEP_TARGET);
+                digitalWrite(LED_PIN, HIGH);
+                setPhase(PH_SWEEP_UP);
+            }
+            break;
+
+        case PH_SWEEP_UP: {
+            float progress = (float)elapsed / SWEEP_UP_MS;
+            if (progress > 1.0f) progress = 1.0f;
+            currentThrottle = THROT_CENTER +
+                (uint16_t)(progress * (SWEEP_TARGET - THROT_CENTER));
+            if (elapsed >= SWEEP_UP_MS) {
+                setPhase(PH_HOLD);
+            }
+            break;
+        }
+
+        case PH_HOLD:
+            currentThrottle = SWEEP_TARGET;
+            if (elapsed >= HOLD_MS) {
+                setPhase(PH_SWEEP_DOWN);
+            }
+            break;
+
+        case PH_SWEEP_DOWN: {
+            float progress = (float)elapsed / SWEEP_DOWN_MS;
+            if (progress > 1.0f) progress = 1.0f;
+            currentThrottle = SWEEP_TARGET -
+                (uint16_t)(progress * (SWEEP_TARGET - THROT_CENTER));
+            if (elapsed >= SWEEP_DOWN_MS) {
+                currentThrottle = THROT_CENTER;
+                digitalWrite(LED_PIN, LOW);
+                setPhase(PH_PAUSE);
+            }
+            break;
+        }
+
+        case PH_PAUSE:
+            currentThrottle = THROT_CENTER;
+            if (elapsed >= PAUSE_MS) {
+                cycle++;
+                Serial.printf("\n===== CYCLE %d =====\n", cycle + 1);
+                digitalWrite(LED_PIN, HIGH);
+                setPhase(PH_SWEEP_UP);
+            }
+            break;
+    }
+
+    // ---- Continuous DShot send at 1 kHz ----
+    if (nowUs - lastSendUs >= DSHOT_INTERVAL_US) {
+        lastSendUs = nowUs;
+        sendDShot(currentThrottle);
+    }
+
+    // ---- Status print ----
+    if (nowMs - lastPrintMs >= STATUS_MS) {
+        lastPrintMs = nowMs;
+        Serial.printf("[%s] DShot=%u\n", phaseStr(phase), currentThrottle);
+    }
+}

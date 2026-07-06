@@ -7,11 +7,15 @@
  * and drives BLHeli_S ESCs via PWM 50Hz (3D mode, bidirectional).
  *
  * State machine:
- *   INIT → ARMING → ARMED ↔ FAILSAFE
+ *   INIT → ARMING → ARMED ↔ COOLDOWN ↔ FAILSAFE
+ *
+ * COOLDOWN is a temporary soft-stop between active drive and true neutral hold
+ * (see COOLDOWN_DURATION_MS in config.h). Distinct from FAILSAFE, which triggers
+ * only on communication loss (no valid command for FAILSAFE_TIMEOUT_MS).
  *
  * LED patterns:
  *   INIT/ARMING : fast blink  (100 ms)
- *   ARMED       : solid ON
+ *   ARMED/COOLDOWN : solid ON
  *   FAILSAFE    : slow blink  (500 ms)
  *
  * @author  Jaki
@@ -30,6 +34,7 @@ enum class State : uint8_t {
     INIT,
     ARMING,
     ARMED,
+    COOLDOWN,   // soft-stop after explicit stop/neutral command (not failsafe)
     FAILSAFE,
 };
 
@@ -39,6 +44,7 @@ static const char* stateStr(State s)
         case State::INIT:     return "INIT";
         case State::ARMING:   return "ARMING";
         case State::ARMED:    return "ARMED";
+        case State::COOLDOWN: return "COOLDOWN";
         case State::FAILSAFE: return "FAILSAFE";
         default:              return "???";
     }
@@ -53,6 +59,8 @@ static SerialParser parser;
 static State        state = State::INIT;
 
 static uint32_t lastCmdMs       = 0;   // millis() of last valid command
+static uint32_t cooldownStartMs = 0;   // millis() when COOLDOWN began
+static bool     commandWasActive = false; // previous cycle had non-idle thrust
 static uint32_t lastStatusMs    = 0;   // millis() of last status report
 static uint32_t lastMotorMs     = 0;   // millis() of last 50 Hz PWM tick
 static uint32_t lastLedToggleMs = 0;
@@ -63,9 +71,6 @@ static float cmdSurge = 0.0f;
 static float cmdSway  = 0.0f;
 static float cmdYaw   = 0.0f;
 
-// =====================================================================
-//  LED helper
-// =====================================================================
 
 static void ledBlink(uint32_t intervalMs)
 {
@@ -90,23 +95,40 @@ static void reportStatus()
 }
 
 /**
- * Run one 50 Hz motor cycle: mix active commands or hold neutral when idle.
+ * Run one 50 Hz motor cycle.
+ *
+ * Four gated behaviors (never mixed):
+ *   FAILSAFE       — ramp/hold neutral until a new valid command clears failsafe
+ *   COOLDOWN       — decay last drive output toward neutral (soft-stop band-aid;
+ *                    see COOLDOWN_DURATION_MS — not used for comm-loss failsafe)
+ *   ARMED + idle   — after cooldown completes, hold true neutral (1500 µs)
+ *   ARMED + active — track cached target via mixer.update(); hold at target
+ *                    until a new command changes it or FAILSAFE_TIMEOUT_MS
+ *                    expires (handled in loop(), not here)
+ *
  * Slew-rate math assumes exactly PWM_UPDATE_MS between calls.
  */
-static void runMotorCycle(uint32_t nowMs)
+static void runMotorCycle()
 {
-    const bool commandStale = (nowMs - lastCmdMs) >= IDLE_NEUTRAL_DELAY_MS;
-    const bool commandIdle  = MotorMixer::isCommandIdle(cmdSurge, cmdSway, cmdYaw);
+    const uint32_t nowMs = millis();
 
-    // Drop stale cached thrust so idle never keeps driving after commands stop
-    if (commandStale && state == State::ARMED) {
-        cmdSurge = cmdSway = cmdYaw = 0.0f;
-    }
-
-    if (state == State::FAILSAFE || commandStale || commandIdle) {
+    if (state == State::FAILSAFE) {
         mixer.holdNeutral();
+    } else if (state == State::COOLDOWN) {
+        const uint32_t elapsed = nowMs - cooldownStartMs;
+        if (elapsed >= COOLDOWN_DURATION_MS) {
+            state = State::ARMED;
+            mixer.holdNeutral();
+            Serial.println("[main] Cooldown complete → neutral hold");
+        } else {
+            mixer.tickCooldown(elapsed, COOLDOWN_DURATION_MS);
+        }
     } else if (state == State::ARMED) {
-        mixer.update(cmdSurge, cmdSway, cmdYaw);
+        if (MotorMixer::isCommandIdle(cmdSurge, cmdSway, cmdYaw)) {
+            mixer.holdNeutral();
+        } else {
+            mixer.update(cmdSurge, cmdSway, cmdYaw);
+        }
     }
 
     mixer.tick();
@@ -133,6 +155,8 @@ void setup()
     Serial.printf( "  Motors : NW=%d  NE=%d  SW=%d  SE=%d\n",
                    PIN_MOTOR_NW, PIN_MOTOR_NE, PIN_MOTOR_SW, PIN_MOTOR_SE);
     Serial.printf( "  Failsafe timeout : %lu ms\n", FAILSAFE_TIMEOUT_MS);
+    Serial.printf( "  Cooldown duration: %lu ms (ESC soft-stop band-aid)\n",
+                   COOLDOWN_DURATION_MS);
     Serial.printf( "  Arming duration  : %lu + %lu ms\n",
                    ARMING_DURATION_MS, ARMING_LOW_DURATION_MS);
     Serial.println("========================================");
@@ -149,13 +173,12 @@ void setup()
     Serial.println("[main] State → ARMED");
     ledOn();
 
-    // ---- Startup Motor Self-Test (once, guarded — never runs from loop()) ----
     if (ENABLE_STARTUP_SELF_TEST) {
         Serial.println("[main] Self-test: ramping ALL motors forward (30%) ...");
         uint32_t testStart = millis();
-        const uint32_t RAMP_UP_MS   = 1000;
-        const uint32_t HOLD_MS      = 1500;
-        const uint32_t RAMP_DOWN_MS = 1000;
+        const uint32_t RAMP_UP_MS   = 10000;
+        const uint32_t HOLD_MS      = 15000;
+        const uint32_t RAMP_DOWN_MS = 10000;
         const uint32_t TOTAL_MS     = RAMP_UP_MS + HOLD_MS + RAMP_DOWN_MS;
 
         while (millis() - testStart < TOTAL_MS) {
@@ -197,9 +220,6 @@ void setup()
     lastMotorMs = millis();
 }
 
-// =====================================================================
-//  Main loop
-// =====================================================================
 
 void loop()
 {
@@ -214,31 +234,45 @@ void loop()
             cmdYaw   = cmd.yaw;
             lastCmdMs = nowMs;
 
+            const bool nowActive = !MotorMixer::isCommandIdle(cmdSurge, cmdSway, cmdYaw);
+
+            // Explicit stop/neutral command (active → idle): soft-stop, not failsafe.
+            if (state == State::ARMED && commandWasActive && !nowActive) {
+                state = State::COOLDOWN;
+                cooldownStartMs = nowMs;
+                mixer.beginCooldown();
+                Serial.println("[main] Active command ended → COOLDOWN (ESC soft-stop)");
+            } else if (state == State::COOLDOWN && nowActive) {
+                state = State::ARMED;
+                Serial.println("[main] Cooldown cancelled → active command");
+            }
+
+            commandWasActive = nowActive;
+
             // If we were in failsafe, recover
             if (state == State::FAILSAFE) {
                 state = State::ARMED;
+                commandWasActive = nowActive;
                 Serial.println("[main] Failsafe cleared → ARMED");
                 ledOn();
             }
         }
     }
 
-    // ---- 2. Failsafe check ----
-    if (state == State::ARMED) {
+    // ---- 2. Failsafe check (communication loss only — not explicit stop) ----
+    if (state == State::ARMED || state == State::COOLDOWN) {
         if (nowMs - lastCmdMs >= FAILSAFE_TIMEOUT_MS) {
             state = State::FAILSAFE;
+            commandWasActive = false;
             cmdSurge = cmdSway = cmdYaw = 0.0f;
             mixer.holdNeutral();
             Serial.println("[main] ⚠ FAILSAFE — no command received");
         }
     }
 
-    // ---- 3. Motor output @ 50 Hz ----
-    // Slew-rate limiter requires fixed PWM_UPDATE_MS cadence; do NOT call
-    // mixer.update/tick faster than this or ESCs see near-instant jumps.
     if (nowMs - lastMotorMs >= PWM_UPDATE_MS) {
         lastMotorMs = nowMs;
-        runMotorCycle(nowMs);
+        runMotorCycle();
     }
 
     // ---- 4. Status report to RPi ----
@@ -250,7 +284,8 @@ void loop()
     // ---- 5. LED indicator ----
     switch (state) {
         case State::ARMING:   ledBlink(100);  break;
-        case State::ARMED:    /* solid on */  break;
+        case State::ARMED:
+        case State::COOLDOWN: /* solid on */  break;
         case State::FAILSAFE: ledBlink(500);  break;
         default:              break;
     }

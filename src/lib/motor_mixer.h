@@ -45,6 +45,19 @@ public:
     static bool isCommandIdle(float surge, float sway, float yaw);
 
     /**
+     * Snapshot current motor output when an active drive command ends.
+     * Used by the COOLDOWN state before ramping toward neutral.
+     */
+    void beginCooldown();
+
+    /**
+     * Linearly decay per-motor targets from the cooldown snapshot toward center.
+     * @param elapsedMs  Time since cooldown started
+     * @param durationMs Total cooldown window (COOLDOWN_DURATION_MS)
+     */
+    void tickCooldown(uint32_t elapsedMs, uint32_t durationMs);
+
+    /**
      * Apply slew-rate limiting and write PWM hardware.
      * Must be called at PWM_UPDATE_MS (50 Hz) from the main loop.
      */
@@ -64,6 +77,7 @@ private:
     uint8_t    pins_[NUM_MOTORS];
     uint16_t   pulseUs_[NUM_MOTORS];       // current PWM pulse width (µs)
     uint16_t   targetPulseUs_[NUM_MOTORS]; // target PWM (ramping toward this)
+    uint16_t   cooldownStartPulseUs_[NUM_MOTORS]; // snapshot at cooldown entry
     float      mixed_[NUM_MOTORS];         // post-mix values [-1,1]
     bool       armed_;
 

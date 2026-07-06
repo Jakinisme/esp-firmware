@@ -10,10 +10,6 @@
 #include <Arduino.h>
 #include <cmath>
 
-// ---------------------------------------------------------------------------
-//  Construction
-// ---------------------------------------------------------------------------
-
 MotorMixer::MotorMixer()
     : armed_(false)
 {
@@ -35,10 +31,6 @@ MotorMixer::MotorMixer()
         mixed_[i]         = 0.0f;
     }
 }
-
-// ---------------------------------------------------------------------------
-//  PWM helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Convert microseconds to LEDC duty value.
@@ -137,10 +129,6 @@ void MotorMixer::tick()
     }
 }
 
-// ---------------------------------------------------------------------------
-//  Initialisation & arming
-// ---------------------------------------------------------------------------
-
 void MotorMixer::begin()
 {
     static const char* names[NUM_MOTORS] = { "NW", "NE", "SW", "SE" };
@@ -180,9 +168,6 @@ void MotorMixer::begin()
     Serial.println("[mixer] ESCs armed ✓");
 }
 
-// ---------------------------------------------------------------------------
-//  Mixing & output
-// ---------------------------------------------------------------------------
 
 void MotorMixer::update(float surge, float sway, float yaw)
 {
@@ -226,6 +211,32 @@ bool MotorMixer::isCommandIdle(float surge, float sway, float yaw)
     return fabsf(surge) <= MOTOR_DEADZONE
         && fabsf(sway)  <= MOTOR_DEADZONE
         && fabsf(yaw)   <= MOTOR_DEADZONE;
+}
+
+void MotorMixer::beginCooldown()
+{
+    for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
+        cooldownStartPulseUs_[i] = pulseUs_[i];
+    }
+}
+
+void MotorMixer::tickCooldown(uint32_t elapsedMs, uint32_t durationMs)
+{
+    if (durationMs == 0) {
+        durationMs = 1;
+    }
+
+    float t = (float)elapsedMs / (float)durationMs;
+    if (t > 1.0f) {
+        t = 1.0f;
+    }
+
+    for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
+        const uint16_t start = cooldownStartPulseUs_[i];
+        const int16_t  diff  = (int16_t)PWM_CENTER_US - (int16_t)start;
+        targetPulseUs_[i] = (uint16_t)((int16_t)start + (int16_t)(diff * t));
+        mixed_[i] = 0.0f;
+    }
 }
 
 void MotorMixer::holdNeutral()
@@ -277,7 +288,7 @@ uint16_t MotorMixer::thrustToPulse3D(float thrust)
     thrust = fmaxf(-1.0f, fminf(1.0f, thrust));
 
     // Linear map:
-    //   thrust  0 → 1500 µs (center)
+    //   thrust  0 → 1500 µs (center){"s":0.7,"sw":0.000,"y":0.000,"ts":0}
     //   thrust +1 → 2000 µs (full forward)
     //   thrust -1 → 1000 µs (full reverse)
     return (uint16_t)(PWM_CENTER_US + thrust * 500.0f);

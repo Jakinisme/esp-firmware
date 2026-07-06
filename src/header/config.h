@@ -97,12 +97,8 @@ static constexpr uint16_t MOTOR_SLEW_RATE_US = 25;
 static constexpr uint16_t MOTOR_NEUTRAL_EXIT_SLEW_US = 8;
 static constexpr uint16_t MOTOR_NEUTRAL_BAND_US      = 30;   // ±30 µs around center
 
-// Post-arm ramp: min → center after phase-2 (avoid instant 1000→1500 jump)
+// Post-arm ramp: min → center after phase-2 (avoid instant 1000→1500 jump) {"s":0.2,"sw":0,"y":0}{"s":0.2,"sw":0,"y":0}
 static constexpr uint32_t ARM_RETURN_RAMP_MS = 1000;
-
-// After this long without a new serial command, treat thrust as neutral (0).
-// Must exceed RPi heartbeat interval (typically 100 ms @ 10 Hz).
-static constexpr uint32_t IDLE_NEUTRAL_DELAY_MS = 250;
 
 // Run forward ramp self-test once in setup() after arming (disable for production)
 static constexpr bool ENABLE_STARTUP_SELF_TEST = true;
@@ -116,6 +112,13 @@ static constexpr unsigned long SERIAL_BAUD = 115200;
 //  Timing
 // =====================================================================
 static constexpr uint32_t FAILSAFE_TIMEOUT_MS   = 2000;   // no cmd → idle motors (RPi @ 10 Hz)
+
+// Temporary mitigation for BLHeli_S "Brake on Stop" oscillation when snapping to
+// 1500 µs while the prop still has spin-down momentum. Holds/decays the last
+// drive output before true neutral. Permanent fix: BLHeliSuite → Brake on Stop /
+// Non-Damped Mode. Tune 400–800 ms on the bench.
+static constexpr uint32_t COOLDOWN_DURATION_MS   = 1000;
+
 static constexpr uint32_t ARMING_DURATION_MS     = 3000;   // center-throttle at boot
 static constexpr uint32_t ARMING_LOW_DURATION_MS = 3000;   // low-throttle (range learn)
 static constexpr uint32_t STATUS_REPORT_MS       = 100;    // status to RPi @ 10 Hz

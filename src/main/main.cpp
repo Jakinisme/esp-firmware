@@ -186,12 +186,12 @@ void setup()
 
             if (elapsed < RAMP_UP_MS) {
                 float t = (float)elapsed / RAMP_UP_MS;
-                mixer.update(t * 0.3f, 0.0f, 0.0f);
+                mixer.update(t * 0.6f, 0.0f, 0.0f);
             } else if (elapsed < RAMP_UP_MS + HOLD_MS) {
-                mixer.update(0.3f, 0.0f, 0.0f);
+                mixer.update(0.6f, 0.0f, 0.0f);
             } else {
                 float t = 1.0f - (float)(elapsed - RAMP_UP_MS - HOLD_MS) / RAMP_DOWN_MS;
-                mixer.update(t * 0.3f, 0.0f, 0.0f);
+                mixer.update(t * 0.6f, 0.0f, 0.0f);
             }
 
             mixer.tick();

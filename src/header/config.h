@@ -63,9 +63,9 @@ static constexpr uint8_t LEDC_CH_SE = 3;
 //  Motor starts spinning at ~1520 µs (forward) or ~1480 µs (reverse)
 //  based on ESC deadband setting.
 // =====================================================================
-static constexpr uint16_t PWM_MIN_US     = 1000;   // full reverse
+static constexpr uint16_t PWM_MIN_US     = 1200;   // full reverse
 static constexpr uint16_t PWM_CENTER_US  = 1500;   // neutral (3D center)
-static constexpr uint16_t PWM_MAX_US     = 2000;   // full forward
+static constexpr uint16_t PWM_MAX_US     = 1800;   // full forward
 
 // =====================================================================
 //  Motor Mixing Matrix
@@ -89,12 +89,12 @@ static constexpr float MIX_MATRIX[NUM_MOTORS][3] = {
 static constexpr float MOTOR_DEADZONE = 0.03f;  // |thrust| < this → idle
 
 // Slew rate limiter — max µs change per update cycle (called at 50 Hz)
-// 25 µs/cycle × 50 Hz = 1250 µs/sec → full range (500µs) in 0.4 sec
-static constexpr uint16_t MOTOR_SLEW_RATE_US = 25;
+// 40 µs/cycle × 50 Hz = 2000 µs/sec → full range (500µs) in 0.25 sec
+static constexpr uint16_t MOTOR_SLEW_RATE_US = 40;
 
 // Slower slew when leaving 3D neutral — BLHeli_S rejects abrupt deadband exits
-// 8 µs/cycle × 50 Hz = 400 µs/sec → 1500→1650 in ~375 ms (matches working test)
-static constexpr uint16_t MOTOR_NEUTRAL_EXIT_SLEW_US = 8;
+// 12 µs/cycle × 50 Hz = 600 µs/sec → 1500→1650 in ~250 ms (matches working test)
+static constexpr uint16_t MOTOR_NEUTRAL_EXIT_SLEW_US = 12;
 static constexpr uint16_t MOTOR_NEUTRAL_BAND_US      = 30;   // ±30 µs around center
 
 // Post-arm ramp: min → center after phase-2 (avoid instant 1000→1500 jump) {"s":0.2,"sw":0,"y":0}{"s":0.2,"sw":0,"y":0}

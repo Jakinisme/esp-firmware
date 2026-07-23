@@ -1,6 +1,7 @@
 /**
  * @file serial_parser.cpp
  * @brief Lightweight JSON parser — reads newline-delimited JSON from RPi
+ *        over UART2 (GPIO16=RX2, GPIO17=TX2).
  */
 
 #include "lib/serial_parser.h"
@@ -40,16 +41,18 @@ SerialParser::SerialParser()
 
 void SerialParser::begin(unsigned long baud)
 {
-    Serial.begin(baud);
-    Serial.setTimeout(5);   // short timeout for readStringUntil (unused here)
+    // UART2 default pins on ESP32 DevKit: RX2=GPIO16, TX2=GPIO17.
+    // Passing them explicitly here so the wiring is documented in code,
+    // not just "whatever the default happens to be".
+    Serial2.begin(baud, SERIAL_8N1, 16, 17);
 }
 
 bool SerialParser::poll()
 {
     bool gotCommand = false;
 
-    while (Serial.available() > 0) {
-        char c = static_cast<char>(Serial.read());
+    while (Serial2.available() > 0) {
+        char c = static_cast<char>(Serial2.read());
 
         if (c == '\n' || c == '\r') {
             // End of line → try to parse
@@ -84,9 +87,6 @@ bool SerialParser::parseJSON(const char* json)
     //   "sw":     → sway
     //   "y":      → yaw
     //   "ts":     → timestamp (optional)
-    //
-    // IMPORTANT: search for "sw": BEFORE "s": to avoid false match.
-    // Instead we use the full quoted key patterns which are unambiguous.
 
     float s = 0.0f, sw = 0.0f, y = 0.0f, ts = 0.0f;
     bool hasS  = extractFloat(json, "\"s\":",  s);
@@ -110,8 +110,9 @@ bool SerialParser::parseJSON(const char* json)
 void SerialParser::sendStatus(bool ok, bool failsafe,
                               const uint16_t throttle[NUM_MOTORS])
 {
-    // Compact JSON — matches what esp32_link._read_response() expects
-    Serial.printf(
+    // Compact JSON — matches what esp32_link._read_response() expects.
+    // Sent over Serial2 (the RPi link), NOT Serial/USB.
+    Serial2.printf(
         "{\"ok\":%d,\"fs\":%d,\"m\":[%u,%u,%u,%u]}\n",
         ok ? 1 : 0,
         failsafe ? 1 : 0,

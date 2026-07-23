@@ -3,7 +3,7 @@
  * @brief Motor mixing implementation for push-pull catamaran (X-config)
  *
  * Uses ESP32 LEDC peripheral to generate 50 Hz PWM for BLHeli_S ESCs
- * in 3D mode.  PWM range: 1000–2000 µs, center 1500 µs.
+ * in 3D mode.  PWM range: PWM_MIN_US–PWM_MAX_US, center PWM_CENTER_US.
  */
 
 #include "lib/motor_mixer.h"
@@ -51,7 +51,6 @@ void MotorMixer::writePulse(uint8_t motorIdx, uint16_t pulseUs)
  * per call, then writes the result to the LEDC hardware.
  *
  * Called once per update cycle (every PWM_UPDATE_MS ≈ 20 ms).
- * At 25 µs/step × 50 Hz = ramp from 1500→2000 in ~0.4 s.
  */
 void MotorMixer::writeRampedPulse(uint8_t motorIdx)
 {
@@ -149,9 +148,9 @@ void MotorMixer::begin()
     }
     delay(ARMING_DURATION_MS);
 
-    // Phase 2: Send min throttle (1000 µs) — required for ESC arm confirmation
-    // The ESC needs to see the full range (center → min) to complete arming.
-    // Without this, the ESC stays in "signal detected" state but never arms.
+    // Phase 2: Send min throttle (PWM_MIN_US) — required for ESC arm confirmation.
+    // Must match the true low endpoint used in thrustToPulse3D() below, or the
+    // ESC may never see the full swing it needs to complete arming.
     Serial.printf("[mixer] Arming phase 2 — min (%u µs) for %lu ms ...\n",
                   PWM_MIN_US, ARMING_LOW_DURATION_MS);
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
@@ -287,9 +286,13 @@ uint16_t MotorMixer::thrustToPulse3D(float thrust)
     // Clamp
     thrust = fmaxf(-1.0f, fminf(1.0f, thrust));
 
-    // Linear map:
-    //   thrust  0 → 1500 µs (center){"s":0.7,"sw":0.000,"y":0.000,"ts":0}
-    //   thrust +1 → 2000 µs (full forward)
-    //   thrust -1 → 1000 µs (full reverse)
-    return (uint16_t)(PWM_CENTER_US + thrust * 500.0f);
+    // Linear map, now consistent with the arming sequence above:
+    //   thrust  0 → PWM_CENTER_US (center)
+    //   thrust +1 → PWM_MAX_US    (full forward)
+    //   thrust -1 → PWM_MIN_US    (full reverse)
+    if (thrust > 0.0f) {
+        return (uint16_t)(PWM_CENTER_US + thrust * (PWM_MAX_US - PWM_CENTER_US));
+    } else {
+        return (uint16_t)(PWM_CENTER_US + thrust * (PWM_CENTER_US - PWM_MIN_US));
+    }
 }

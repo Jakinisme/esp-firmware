@@ -101,7 +101,7 @@ static constexpr uint16_t MOTOR_NEUTRAL_BAND_US      = 30;   // ±30 µs around 
 static constexpr uint32_t ARM_RETURN_RAMP_MS = 1000;
 
 // Run forward ramp self-test once in setup() after arming (disable for production)
-static constexpr bool ENABLE_STARTUP_SELF_TEST = true;
+static constexpr bool ENABLE_STARTUP_SELF_TEST = false;
 
 // =====================================================================
 //  Serial (RPi ↔ ESP32)

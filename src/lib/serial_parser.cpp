@@ -55,10 +55,13 @@ bool SerialParser::poll()
         char c = static_cast<char>(Serial2.read());
 
         if (c == '\n' || c == '\r') {
-            // End of line → try to parse
+            // End of line → try to parse. A burst may contain several frames;
+            // keep the last valid one and report success if ANY frame parsed.
             if (pos_ > 0) {
                 buf_[pos_] = '\0';
-                gotCommand = parseJSON(buf_);
+                if (parseJSON(buf_)) {
+                    gotCommand = true;
+                }
             }
             pos_ = 0;
         } else {
@@ -76,9 +79,9 @@ bool SerialParser::poll()
 
 bool SerialParser::parseJSON(const char* json)
 {
-    // Sanity check: must contain opening brace
+    // Sanity check: must contain opening brace. On failure leave cmd_
+    // untouched so the last valid frame stays active.
     if (json[0] != '{') {
-        cmd_.valid = false;
         return false;
     }
 
@@ -95,8 +98,7 @@ bool SerialParser::parseJSON(const char* json)
     /*bool hasTS =*/ extractFloat(json, "\"ts\":", ts);
 
     if (!hasS || !hasSW || !hasY) {
-        cmd_.valid = false;
-        return false;
+        return false;   // incomplete frame — keep previous valid command
     }
 
     cmd_.surge     = constrain(s,  -1.0f, 1.0f);

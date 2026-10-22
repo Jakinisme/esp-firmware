@@ -31,10 +31,10 @@
 // =====================================================================
 //  Motor GPIO Pins — adjust to match your wiring
 // =====================================================================
-static constexpr uint8_t PIN_MOTOR_NW = 25;   // front-left
-static constexpr uint8_t PIN_MOTOR_NE = 26;   // front-right
-static constexpr uint8_t PIN_MOTOR_SW = 27;   // rear-left
-static constexpr uint8_t PIN_MOTOR_SE = 14;   // rear-right
+static constexpr uint8_t PIN_MOTOR_NW = 33;   // front-left  (kiri depan)
+static constexpr uint8_t PIN_MOTOR_NE = 25;   // front-right (kanan depan)
+static constexpr uint8_t PIN_MOTOR_SW = 26;   // rear-left   (kiri belakang)
+static constexpr uint8_t PIN_MOTOR_SE = 27;   // rear-right  (kanan belakang)
 
 static constexpr uint8_t NUM_MOTORS = 4;
 
@@ -81,6 +81,21 @@ static constexpr float MIX_MATRIX[NUM_MOTORS][3] = {
     /* NE */ { +1.0f, -1.0f, -1.0f },
     /* SW */ { +1.0f, -1.0f, +1.0f },
     /* SE */ { +1.0f, +1.0f, -1.0f },
+};
+
+// =====================================================================
+//  Per-motor direction inversion
+//
+//  true = flip forward/reverse in software (thruster mounted/ESC wired the
+//  other way round).  Inverted motor: forward → pulse BELOW PWM_CENTER_US,
+//  reverse → pulse ABOVE it.  Mixing, arming ramp and center snapping are
+//  unaffected — only the sign fed to thrustToPulse3D() flips.
+// =====================================================================
+static constexpr bool MOTOR_INVERT[NUM_MOTORS] = {
+    /* NW */ false,
+    /* NE */ true,    // kanan atas (kanan depan) — putaran terbalik
+    /* SW */ false,
+    /* SE */ false,
 };
 
 // =====================================================================

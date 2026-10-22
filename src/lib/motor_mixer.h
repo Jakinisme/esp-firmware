@@ -100,6 +100,9 @@ private:
      *  0        → 1500 µs  (center, no spin)
      *  (0, +1]  → [1500, 2000] µs  forward
      *  [-1, 0)  → [1500, 1000] µs  reverse
+     *
+     * Motor index selects MOTOR_INVERT[] so a backwards thruster is
+     * mirrored around center instead of rewired.
      */
-    static uint16_t thrustToPulse3D(float thrust);
+    static uint16_t thrustToPulse3D(float thrust, uint8_t motorIdx);
 };

@@ -184,7 +184,7 @@ void MotorMixer::update(float surge, float sway, float yaw)
 
     // ---- 2. Set target PWM (actual output applied in tick()) ----
     for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        targetPulseUs_[i] = thrustToPulse3D(mixed_[i]);
+        targetPulseUs_[i] = thrustToPulse3D(mixed_[i], i);
     }
 }
 
@@ -276,7 +276,7 @@ void MotorMixer::getMixedValues(float out[NUM_MOTORS]) const
 //  3D-mode PWM conversion
 // ---------------------------------------------------------------------------
 
-uint16_t MotorMixer::thrustToPulse3D(float thrust)
+uint16_t MotorMixer::thrustToPulse3D(float thrust, uint8_t motorIdx)
 {
     // Deadzone → center (neutral, no spin). Use <= so ±deadzone never maps to ±15 µs.
     if (fabsf(thrust) <= MOTOR_DEADZONE) {
@@ -285,6 +285,12 @@ uint16_t MotorMixer::thrustToPulse3D(float thrust)
 
     // Clamp
     thrust = fmaxf(-1.0f, fminf(1.0f, thrust));
+
+    // Backwards thruster: mirror around center so forward → below center,
+    // reverse → above center.
+    if (MOTOR_INVERT[motorIdx]) {
+        thrust = -thrust;
+    }
 
     // Linear map, now consistent with the arming sequence above:
     //   thrust  0 → PWM_CENTER_US (center)

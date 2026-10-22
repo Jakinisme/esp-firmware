@@ -144,6 +144,10 @@ void setup()
     pinMode(PIN_LED, OUTPUT);
     ledOff();
 
+    // Serial (USB/UART0) — debug log ke PC. Tanpa ini Serial.println() tidak keluar.
+    Serial.begin(SERIAL_BAUD);
+    delay(300);   // tunggu USB CDC siap
+
     // Serial (RPi ↔ ESP32)
     parser.begin(SERIAL_BAUD);
 

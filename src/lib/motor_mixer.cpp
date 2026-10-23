@@ -148,19 +148,29 @@ void MotorMixer::begin()
     }
     delay(ARMING_DURATION_MS);
 
-    // Phase 2: Send min throttle (PWM_MIN_US) — required for ESC arm confirmation.
-    // Must match the true low endpoint used in thrustToPulse3D() below, or the
-    // ESC may never see the full swing it needs to complete arming.
-    Serial.printf("[mixer] Arming phase 2 — min (%u µs) for %lu ms ...\n",
-                  PWM_MIN_US, ARMING_LOW_DURATION_MS);
-    for (uint8_t i = 0; i < NUM_MOTORS; ++i) {
-        writePulse(i, PWM_MIN_US);
-    }
-    delay(ARMING_LOW_DURATION_MS);
+    // Phase 2: ramp to full forward — every ESC must see the swing endpoint
+    // (3D range learn) and the operator can verify forward direction.
+    // Ramps, never jumps: an instant step disarms BLHeli_S 3D.
+    Serial.printf("[mixer] Arming phase 2 — ramp center→fwd (%u µs), hold %lu ms ...\n",
+                  PWM_MAX_US, ARMING_SWING_HOLD_MS);
+    rampAllBlocking(PWM_MAX_US, MOTOR_NEUTRAL_EXIT_SLEW_US, PWM_UPDATE_MS);
+    delay(ARMING_SWING_HOLD_MS);
 
-    // Ramp back to center — instant 1000→1500 jump disarms BLHeli_S 3D ESCs
-    Serial.printf("[mixer] Arming return — ramp min→center (%u µs) over %lu ms ...\n",
-                  PWM_CENTER_US, ARM_RETURN_RAMP_MS);
+    // Phase 3: back to center
+    Serial.printf("[mixer] Arming phase 3 — ramp fwd→center (%u µs), hold %lu ms ...\n",
+                  PWM_CENTER_US, ARMING_CENTER_HOLD_MS);
+    rampAllBlocking(PWM_CENTER_US, MOTOR_NEUTRAL_EXIT_SLEW_US, PWM_UPDATE_MS);
+    delay(ARMING_CENTER_HOLD_MS);
+
+    // Phase 4: ramp to full reverse — same range learn, verify reverse direction
+    Serial.printf("[mixer] Arming phase 4 — ramp center→rev (%u µs), hold %lu ms ...\n",
+                  PWM_MIN_US, ARMING_SWING_HOLD_MS);
+    rampAllBlocking(PWM_MIN_US, MOTOR_NEUTRAL_EXIT_SLEW_US, PWM_UPDATE_MS);
+    delay(ARMING_SWING_HOLD_MS);
+
+    // Phase 5: ramp back to center — instant jump disarms BLHeli_S 3D ESCs
+    Serial.printf("[mixer] Arming phase 5 — ramp rev→center (%u µs) ...\n",
+                  PWM_CENTER_US);
     rampAllBlocking(PWM_CENTER_US, MOTOR_NEUTRAL_EXIT_SLEW_US, PWM_UPDATE_MS);
 
     armed_ = true;

@@ -31,10 +31,10 @@
 // =====================================================================
 //  Motor GPIO Pins — adjust to match your wiring
 // =====================================================================
-static constexpr uint8_t PIN_MOTOR_NW = 33;   // front-left  (kiri depan)
-static constexpr uint8_t PIN_MOTOR_NE = 25;   // front-right (kanan depan)
-static constexpr uint8_t PIN_MOTOR_SW = 26;   // rear-left   (kiri belakang)
-static constexpr uint8_t PIN_MOTOR_SE = 27;   // rear-right  (kanan belakang)
+static constexpr uint8_t PIN_MOTOR_NW = 32;   // front-left  (kiri depan)
+static constexpr uint8_t PIN_MOTOR_NE = 33;   // front-right (kanan depan)
+static constexpr uint8_t PIN_MOTOR_SW = 25;   // rear-left   (kiri belakang)
+static constexpr uint8_t PIN_MOTOR_SE = 26;   // rear-right  (kanan belakang)
 
 static constexpr uint8_t NUM_MOTORS = 4;
 
@@ -112,8 +112,7 @@ static constexpr uint16_t MOTOR_SLEW_RATE_US = 40;
 static constexpr uint16_t MOTOR_NEUTRAL_EXIT_SLEW_US = 12;
 static constexpr uint16_t MOTOR_NEUTRAL_BAND_US      = 30;   // ±30 µs around center
 
-// Post-arm ramp: min → center after phase-2 (avoid instant 1000→1500 jump) {"s":0.2,"sw":0,"y":0}{"s":0.2,"sw":0,"y":0}
-static constexpr uint32_t ARM_RETURN_RAMP_MS = 1000;
+// Arming ramps use MOTOR_NEUTRAL_EXIT_SLEW_US; see ARMING_* holds below.
 
 // Run forward ramp self-test once in setup() after arming (disable for production)
 static constexpr bool ENABLE_STARTUP_SELF_TEST = false;
@@ -134,8 +133,9 @@ static constexpr uint32_t FAILSAFE_TIMEOUT_MS   = 2000;   // no cmd → idle mot
 // Non-Damped Mode. Tune 400–800 ms on the bench.
 static constexpr uint32_t COOLDOWN_DURATION_MS   = 1000;
 
-static constexpr uint32_t ARMING_DURATION_MS     = 3000;   // center-throttle at boot
-static constexpr uint32_t ARMING_LOW_DURATION_MS = 3000;   // low-throttle (range learn)
+static constexpr uint32_t ARMING_DURATION_MS     = 3000;   // center hold at boot
+static constexpr uint32_t ARMING_SWING_HOLD_MS   = 800;    // hold at full fwd / full rev
+static constexpr uint32_t ARMING_CENTER_HOLD_MS  = 600;    // hold at center between swings
 static constexpr uint32_t STATUS_REPORT_MS       = 100;    // status to RPi @ 10 Hz
 static constexpr uint32_t PWM_UPDATE_MS          = 20;     // 50 Hz PWM update rate
 

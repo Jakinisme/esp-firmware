@@ -161,8 +161,10 @@ void setup()
     Serial.printf( "  Failsafe timeout : %lu ms\n", FAILSAFE_TIMEOUT_MS);
     Serial.printf( "  Cooldown duration: %lu ms (ESC soft-stop band-aid)\n",
                    COOLDOWN_DURATION_MS);
-    Serial.printf( "  Arming duration  : %lu + %lu ms\n",
-                   ARMING_DURATION_MS, ARMING_LOW_DURATION_MS);
+    Serial.printf( "  Arming sequence  : center %lu ms → fwd %lu ms → center %lu ms"
+                   " → rev %lu ms → center\n",
+                   ARMING_DURATION_MS, ARMING_SWING_HOLD_MS,
+                   ARMING_CENTER_HOLD_MS, ARMING_SWING_HOLD_MS);
     Serial.println("========================================");
 
     // Transition to arming
